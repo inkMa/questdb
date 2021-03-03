@@ -487,13 +487,16 @@ public class AlterTableDropPartitionTest extends AbstractGriffinTest {
 
     @Test
     public void testPartitionDeletedFromDiskWithoutDropAfterOpeningByDay() throws Exception {
-        String startDate = "2020-01-01";
-        int day = PartitionBy.DAY;
-        int partitionToCheck = 0;
-        String folderToDelete = "default";
-        int deletedPartitionIndex = 0;
-        int rowCount = 10000;
-        testPartitionDirDeleted(null, startDate, day, partitionToCheck, folderToDelete, deletedPartitionIndex, 5, rowCount, rowCount / 5);
+        // Cannot run this on Windows - e.g. delete opened files
+        if (!configuration.getFilesFacade().isRestrictedFileSystem()) {
+            String startDate = "2020-01-01";
+            int day = PartitionBy.DAY;
+            int partitionToCheck = 0;
+            String folderToDelete = "2020-01-02";
+            int deletedPartitionIndex = 0;
+            int rowCount = 10000;
+            testPartitionDirDeleted(null, startDate, day, partitionToCheck, folderToDelete, deletedPartitionIndex, 5, rowCount, rowCount / 5);
+        }
     }
 
     @Test
@@ -561,7 +564,7 @@ public class AlterTableDropPartitionTest extends AbstractGriffinTest {
                         } else {
                             // Should throw something meaningful
                             try {
-                                Assert.assertEquals(-1, reader.openPartition(deletedPartitionIndex));
+                                reader.openPartition(deletedPartitionIndex);
                                 Assert.fail();
                             } catch (CairoException ex) {
                                 TestUtils.assertContains(ex.getMessage(), expected);
@@ -593,7 +596,11 @@ public class AlterTableDropPartitionTest extends AbstractGriffinTest {
                 deleteDir(f);
             }
         }
-        file.delete();
+        if (file.delete()) {
+            System.out.println("Deleted: " + file.getAbsolutePath());
+        } else {
+            Assert.fail("Failed to delete dir: " + file.getAbsolutePath());
+        }
     }
 
     private void assertFailure(String sql, int position, String message) throws Exception {
