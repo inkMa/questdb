@@ -40,7 +40,6 @@ import java.util.concurrent.locks.LockSupport;
 
 public class TableReader implements Closeable, SymbolTableSource {
     private static final Log LOG = LogFactory.getLog(TableReader.class);
-    private static final PartitionPathGenerator DEFAULT_GEN = (reader, partitionIndex) -> reader.pathGenDefault();
     private final ColumnCopyStruct tempCopyStruct = new ColumnCopyStruct();
     private final FilesFacade ff;
     private final Path path;
@@ -49,7 +48,6 @@ public class TableReader implements Closeable, SymbolTableSource {
     private final DateFormat partitionFormat;
     private final LongList openPartitionTimestamp;
     private final LongList openPartitionSize;
-    private final PartitionPathGenerator partitionPathGenerator;
     private final TableReaderRecordCursor recordCursor = new TableReaderRecordCursor();
     private final Timestamps.TimestampFloorMethod timestampFloorMethod;
     private final String tableName;
@@ -86,16 +84,9 @@ public class TableReader implements Closeable, SymbolTableSource {
             readTxnSlow();
             openSymbolMaps();
 
-            partitionCount = calculatePartitionCount();
-            if (partitionBy == PartitionBy.NONE) {
-                timestampFloorMethod = null;
-                partitionFormat = null;
-                partitionPathGenerator = DEFAULT_GEN;
-            } else {
-                timestampFloorMethod = TableUtils.getPartitionFloor(partitionBy);
-                partitionFormat = TableUtils.getPartitionDateFmt(partitionBy);
-                partitionPathGenerator = TableReader::pathGenPartitioned;
-            }
+            partitionCount = txFile.getPartitionsCount();
+            partitionFormat = TableUtils.getPartitionDateFmt(partitionBy);
+            timestampFloorMethod = partitionBy == PartitionBy.NONE ? null : TableUtils.getPartitionFloor(partitionBy);
 
             int capacity = getColumnBase(partitionCount);
             this.columns = new ObjList<>(capacity);
@@ -544,10 +535,6 @@ public class TableReader implements Closeable, SymbolTableSource {
         }
     }
 
-    private int calculatePartitionCount() {
-        return txFile.getPartitionsCount();
-    }
-
     private void closeColumn(int columnBase, int columnIndex) {
         final int index = getPrimaryColumnIndex(columnBase, columnIndex);
         Misc.free(columns.getAndSetQuick(index, NullColumn.INSTANCE));
@@ -600,7 +587,7 @@ public class TableReader implements Closeable, SymbolTableSource {
                 bitmapIndexes.setQuick(globalIndex + 1, reader);
             }
         } else {
-            Path path = partitionPathGenerator.generate(this, getPartitionIndex(columnBase));
+            Path path = pathGenPartitioned(getPartitionIndex(columnBase));
             try {
                 if (direction == BitmapIndexReader.DIR_BACKWARD) {
                     reader = new BitmapIndexBwdReader(configuration, path.chopZ(), metadata.getColumnName(columnIndex), getColumnTop(columnBase, columnIndex));
@@ -632,7 +619,7 @@ public class TableReader implements Closeable, SymbolTableSource {
             final int base = partitionIndex << columnBits;
             final int oldBase = partitionIndex << columnCountBits;
             try {
-                final Path path = partitionPathGenerator.generate(this, partitionIndex);
+                final Path path = pathGenPartitioned(partitionIndex);
                 long partitionRowCount = openPartitionSize.getQuick(partitionIndex);
                 final boolean lastPartition = partitionIndex == partitionCount - 1;
                 for (int i = 0; i < columnCount; i++) {
@@ -814,9 +801,8 @@ public class TableReader implements Closeable, SymbolTableSource {
         }
 
         try {
-            Path path = partitionPathGenerator.generate(this, partitionIndex);
+            Path path = pathGenPartitioned(partitionIndex);
             if (ff.exists(path)) {
-
                 path.chopZ();
 
                 final boolean lastPartition = partitionIndex == partitionCount - 1;
@@ -839,14 +825,21 @@ public class TableReader implements Closeable, SymbolTableSource {
             }
             LOG.error().$("open partition failed, partition does not exist on the disk. [path=").utf8(path.$()).I$();
 
-            var exception = CairoException.instance(0).put("Partition '");
-            formatPartitionDirName(partitionIndex, exception.message);
-            exception.put("' does not exist in table '")
-                    .put(tableName)
-                    .put("' directory. Run [ALTER TABLE ").put(tableName).put(" DROP PARTITION LIST '");
-            formatPartitionDirName(partitionIndex, exception.message);
-            exception.put("'] to repair the table or restore the partition directory.");
-            throw exception;
+            if (getPartitionedBy() != PartitionBy.NONE) {
+                var exception = CairoException.instance(0).put("Partition '");
+                formatPartitionDirName(partitionIndex, exception.message);
+                exception.put("' does not exist in table '")
+                        .put(tableName)
+                        .put("' directory. Run [ALTER TABLE ").put(tableName).put(" DROP PARTITION LIST '");
+                formatPartitionDirName(partitionIndex, exception.message);
+                exception.put("'] to repair the table or restore the partition directory.");
+                throw exception;
+            } else {
+                throw CairoException.instance(0).put("Table '").put(tableName)
+                        .put("' data directory does not exist on the disk at ")
+                        .put(path)
+                        .put(". Restore data on disk or drop the table.");
+            }
         } finally {
             path.trimTo(rootLen);
         }
@@ -868,10 +861,6 @@ public class TableReader implements Closeable, SymbolTableSource {
                 symbolMapReaders.extendAndSet(i, symbolMapReader);
             }
         }
-    }
-
-    private Path pathGenDefault() {
-        return path.concat(TableUtils.DEFAULT_PARTITION_NAME).$();
     }
 
     private Path pathGenPartitioned(int partitionIndex) {
@@ -1139,7 +1128,7 @@ public class TableReader implements Closeable, SymbolTableSource {
         for (int partitionIndex = 0; partitionIndex < partitionCount; partitionIndex++) {
             int base = getColumnBase(partitionIndex);
             try {
-                final Path path = partitionPathGenerator.generate(this, partitionIndex);
+                final Path path = pathGenPartitioned(partitionIndex);
                 final long partitionRowCount = openPartitionSize.getQuick(partitionIndex);
                 final boolean lastPartition = partitionIndex == partitionCount - 1;
 
@@ -1192,11 +1181,6 @@ public class TableReader implements Closeable, SymbolTableSource {
                 path.trimTo(rootLen);
             }
         }
-    }
-
-    @FunctionalInterface
-    private interface PartitionPathGenerator {
-        Path generate(TableReader reader, int partitionIndex);
     }
 
     private static class ColumnCopyStruct {
