@@ -24,14 +24,20 @@
 
 package io.questdb.griffin;
 
+import io.questdb.cairo.*;
+import io.questdb.cairo.security.AllowAllCairoSecurityContext;
 import io.questdb.cairo.sql.RecordCursor;
 import io.questdb.cairo.sql.RecordCursorFactory;
 import io.questdb.griffin.engine.functions.rnd.SharedRandom;
 import io.questdb.std.Rnd;
+import io.questdb.std.str.Path;
 import io.questdb.test.tools.TestUtils;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
+
+import java.io.File;
+import java.nio.file.Paths;
 
 import static io.questdb.griffin.CompiledQuery.ALTER;
 
@@ -438,6 +444,74 @@ public class AlterTableDropPartitionTest extends AbstractGriffinTest {
                     }
                 }
         );
+    }
+
+    @Test
+    public void testPartitionDeletedFromDiskWithoutDrop() throws Exception {
+        TestUtils.assertMemoryLeak(() -> {
+            assertMemoryLeak(() -> {
+                try (TableModel src = new TableModel(configuration, "src", PartitionBy.DAY)) {
+                    int rowCount = 10000;
+                    int partitionCount = 5;
+                    createPopulateTable(
+                            src.col("l", ColumnType.LONG)
+                                    .col("i", ColumnType.INT)
+                                    .timestamp("ts"),
+                            rowCount,
+                            "2020-01-01",
+                            partitionCount);
+
+                    try (var reader = engine.getReader(AllowAllCairoSecurityContext.INSTANCE, src.getName())) {
+                        int partitionRowCount = rowCount / partitionCount;
+                        Assert.assertEquals(partitionRowCount, reader.openPartition(0));
+
+                        // read first column on first partition
+                        int colIndex = TableReader.getPrimaryColumnIndex(reader.getColumnBase(0), 0);
+                        long sum = 0;
+                        Assert.assertTrue(colIndex > 0); // This can change with refactoring, test has to be updated to get col index correctly
+                        for(int i = 0; i < partitionCount; i++) {
+                            sum += reader.getColumn(colIndex).getLong(0);
+                        }
+                        Assert.assertTrue(sum > 0);
+
+                        // Delete partition folder for "2020-01-02"
+                        File dir = new File(Paths.get(root.toString(), src.getName(), "2020-01-02").toString());
+                        deleteDir(dir);
+
+                        // Should not affect open partition
+                        reader.reload();
+                        long sum2 = 0;
+                        for(int i = 0; i < partitionCount; i++) {
+                            sum2 += reader.getColumn(colIndex).getLong(0);
+                        }
+
+                        Assert.assertEquals(sum, sum2);
+
+                        // Should throw something meaningful
+                        try {
+                            Assert.assertEquals(-1, reader.openPartition(1));
+                            Assert.fail();
+                        } catch (CairoException ex) {
+                            TestUtils.assertEquals(
+                                    "[0] Partition '2020-01-02' does not exist in table 'src' directory. " +
+                                            "Run [ALTER TABLE src DROP PARTITION LIST '2020-01-02'] " +
+                                            "to repair the table or restore the partition directory.",
+                                    ex.getMessage());
+                        }
+                    }
+                }
+            });
+        });
+    }
+
+    private void deleteDir(File file) {
+        File[] contents = file.listFiles();
+        if (contents != null) {
+            for (File f : contents) {
+                deleteDir(f);
+            }
+        }
+        file.delete();
     }
 
     private void assertFailure(String sql, int position, String message) throws Exception {

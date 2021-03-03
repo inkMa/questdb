@@ -657,7 +657,7 @@ public final class TableUtils {
         }
     }
 
-    static Timestamps.TimestampAddMethod getPartitionAdd(int partitionBy) {
+    public static Timestamps.TimestampAddMethod getPartitionAdd(int partitionBy) {
         switch (partitionBy) {
             case PartitionBy.DAY:
                 return Timestamps.ADD_DD;
