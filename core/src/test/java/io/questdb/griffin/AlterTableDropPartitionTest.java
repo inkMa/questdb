@@ -566,6 +566,10 @@ public class AlterTableDropPartitionTest extends AbstractGriffinTest {
                             } catch (CairoException ex) {
                                 TestUtils.assertContains(ex.getMessage(), expected);
                             }
+
+                            if (partitionBy != PartitionBy.NONE) {
+                                compiler.compile("ALTER TABLE " + src.getName() + " DROP PARTITION LIST '" + folderToDelete + "';", sqlExecutionContext);
+                            }
                         }
                     }
                 }
